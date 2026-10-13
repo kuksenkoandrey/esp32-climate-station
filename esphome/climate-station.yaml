@@ -1,0 +1,709 @@
+# ==========================================
+#   ESP32 Climate Station — основной конфиг
+#   https://github.com/kuksenkoandrey/esp32-climate-station
+# ==========================================
+
+substitutions:
+  name: climate-station
+  friendly_name: "Climate Station"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  includes:
+    - <driver/ledc.h>
+  on_boot:
+    priority: 600
+    then:
+      # Инициализация LEDC для подсветки дисплея (GPIO10)
+      - lambda: |-
+          ledc_timer_config_t ledc_timer = {
+              .speed_mode       = LEDC_LOW_SPEED_MODE,
+              .duty_resolution  = LEDC_TIMER_8_BIT,
+              .timer_num        = LEDC_TIMER_1,
+              .freq_hz          = 15000,
+              .clk_cfg          = LEDC_AUTO_CLK
+          };
+          ledc_timer_config(&ledc_timer);
+
+          ledc_channel_config_t ledc_channel = {
+              .gpio_num       = 10,
+              .speed_mode     = LEDC_LOW_SPEED_MODE,
+              .channel        = LEDC_CHANNEL_0,
+              .intr_type      = LEDC_INTR_DISABLE,
+              .timer_sel      = LEDC_TIMER_1,
+              .duty           = 178,
+              .hpoint         = 0
+          };
+          ledc_channel_config(&ledc_channel);
+      # Инициализация глобальных переменных
+      - lambda: |-
+          id(current_display_mode) = "CLOCK";
+          id(backlight_brightness) = 1.0f;
+          id(last_backlight_brightness) = 1.0f;
+          id(backlight_enabled) = true;
+          id(previous_mode) = "CLOCK";
+          id(settings_index) = 2;
+          id(pending_backlight_delay) = false;
+          id(led_mode_index) = 0;
+          id(led_on) = false;
+          id(led_previous_mode) = "CLOCK";
+      - script.execute: apply_backlight
+      - component.update: tft_display
+
+esp32:
+  board: esp32-c6-devkitc-1
+  variant: esp32c6
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+# Кастомный компонент для датчика HC8 (лежит в ../components/hc8_full)
+external_components:
+  - source:
+      type: local
+      path: ../components
+
+i2c:
+  sda: GPIO2
+  scl: GPIO3
+  scan: true
+
+uart:
+  - id: uart_hc8
+    tx_pin: GPIO5
+    rx_pin: GPIO4
+    baud_rate: 9600
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Climate Station Fallback"
+    password: !secret fallback_password
+  fast_connect: true
+  power_save_mode: NONE
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+
+captive_portal:
+
+time:
+  - platform: sntp
+    id: current_time
+    timezone: "Europe/Moscow"
+
+globals:
+  - id: scroll_x
+    type: int
+    initial_value: '320'
+  - id: current_display_mode
+    type: std::string
+    initial_value: '"CLOCK"'
+  - id: previous_mode
+    type: std::string
+    initial_value: '"CLOCK"'
+  - id: settings_index
+    type: int
+    initial_value: '2'
+  - id: backlight_brightness
+    type: float
+    initial_value: '1.0'
+  - id: last_backlight_brightness
+    type: float
+    initial_value: '1.0'
+  - id: backlight_enabled
+    type: bool
+    initial_value: 'true'
+  - id: pending_backlight_delay
+    type: bool
+    initial_value: 'false'
+  - id: led_mode_index
+    type: int
+    initial_value: '0'
+  - id: led_on
+    type: bool
+    initial_value: 'false'
+  - id: led_previous_mode
+    type: std::string
+    initial_value: '"CLOCK"'
+
+script:
+  - id: apply_backlight
+    then:
+      - lambda: |-
+          if (!id(backlight_enabled) || id(backlight_brightness) <= 0.0f) {
+            ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 255);
+          } else {
+            const float max_low_time = 0.30f;
+            float low_time = max_low_time * sqrtf(id(backlight_brightness));
+            int duty_val = 255 - (int)(low_time * 255.0f);
+            if (duty_val > 255) duty_val = 255;
+            if (duty_val < 0) duty_val = 0;
+            ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty_val);
+          }
+          ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+
+  - id: apply_preset
+    then:
+      - lambda: |-
+          static const float presets[3] = {0.04f, 0.30f, 1.00f};
+          int idx = id(settings_index);
+          if (idx < 0) idx = 0;
+          if (idx > 2) idx = 2;
+          id(backlight_brightness) = presets[idx];
+          id(last_backlight_brightness) = presets[idx];
+          id(backlight_enabled) = true;
+      - script.execute: apply_backlight
+      - component.update: tft_display
+
+  - id: apply_led_mode
+    then:
+      - lambda: |-
+          int idx = id(led_mode_index);
+          if (idx < 0) idx = 0;
+          if (idx > 2) idx = 2;
+          auto call = id(onboard_rgb_led).turn_on();
+          call.set_transition_length(0);
+          if (idx == 2) {
+            call.set_effect("LSD");
+          } else {
+            call.set_effect("");
+            if (idx == 0) {
+              call.set_rgb(1.0f, 0.0f, 0.0f);
+            } else {
+              call.set_rgb(1.0f, 0.70f, 0.40f);
+            }
+          }
+          call.perform();
+          id(led_on) = true;
+
+  - id: handle_long_3s
+    then:
+      - lambda: |-
+          if (id(led_on)) {
+            auto call = id(onboard_rgb_led).turn_off();
+            call.set_transition_length(0);
+            call.perform();
+            id(led_on) = false;
+            ESP_LOGI("btn", "LED: OFF");
+          } else {
+            id(apply_led_mode).execute();
+            ESP_LOGI("btn", "LED: ON");
+          }
+
+  - id: handle_long_5s
+    then:
+      - lambda: |-
+          id(led_previous_mode) = id(current_display_mode);
+          id(current_display_mode) = "LED_MENU";
+      - script.execute: apply_led_mode
+      - component.update: tft_display
+      - lambda: 'ESP_LOGI("btn", "LED_MENU: OPEN");'
+
+  - id: handle_single_click
+    mode: single
+    then:
+      - lambda: |-
+          std::string m = id(current_display_mode);
+          bool from_off = (m == "OFF");
+
+          if (m == "SETTINGS") {
+            id(settings_index) = (id(settings_index) + 1) % 3;
+            id(apply_preset).execute();
+            id(pending_backlight_delay) = false;
+            return;
+          }
+          if (m == "LED_MENU") {
+            id(led_mode_index) = (id(led_mode_index) + 1) % 3;
+            id(apply_led_mode).execute();
+            id(pending_backlight_delay) = false;
+            return;
+          }
+          if (m == "CLOCK") {
+            id(current_display_mode) = "INFO";
+            id(backlight_enabled) = true;
+            if (id(backlight_brightness) <= 0.0f) {
+              id(backlight_brightness) = id(last_backlight_brightness);
+            }
+          } else if (m == "INFO") {
+            id(current_display_mode) = "OFF";
+            id(backlight_enabled) = false;
+          } else if (m == "OFF") {
+            id(current_display_mode) = "CLOCK";
+            id(backlight_enabled) = true;
+            if (id(backlight_brightness) <= 0.0f) {
+              id(backlight_brightness) = id(last_backlight_brightness);
+            }
+          }
+          id(pending_backlight_delay) = from_off && (id(current_display_mode) != "OFF");
+      - component.update: tft_display
+      - if:
+          condition:
+            lambda: 'return id(pending_backlight_delay);'
+          then:
+            - lambda: 'id(pending_backlight_delay) = false;'
+            - delay: 80ms
+      - script.execute: apply_backlight
+
+  - id: handle_double_click
+    mode: single
+    then:
+      - lambda: |-
+          std::string m = id(current_display_mode);
+          if (m == "SETTINGS") {
+            id(current_display_mode) = id(previous_mode);
+            if (id(current_display_mode) == "OFF") {
+              id(backlight_enabled) = false;
+            } else {
+              id(backlight_enabled) = true;
+            }
+            id(pending_backlight_delay) = false;
+            return;
+          }
+          if (m == "LED_MENU") {
+            id(current_display_mode) = id(led_previous_mode);
+            id(pending_backlight_delay) = false;
+            return;
+          }
+
+          bool was_off = (m == "OFF");
+          float target = id(last_backlight_brightness);
+          if (target <= 0.01f) target = 0.30f;
+          static const float presets[3] = {0.04f, 0.30f, 1.00f};
+          int idx = 1;
+          float best = 999.0f;
+          for (int i = 0; i < 3; i++) {
+            float d = presets[i] - target;
+            if (d < 0) d = -d;
+            if (d < best) { best = d; idx = i; }
+          }
+          id(settings_index) = idx;
+          id(previous_mode) = m;
+          id(current_display_mode) = "SETTINGS";
+          id(backlight_enabled) = true;
+          id(backlight_brightness) = presets[idx];
+          id(last_backlight_brightness) = presets[idx];
+          id(pending_backlight_delay) = was_off;
+      - component.update: tft_display
+      - if:
+          condition:
+            lambda: 'return id(pending_backlight_delay);'
+          then:
+            - lambda: 'id(pending_backlight_delay) = false;'
+            - delay: 80ms
+      - script.execute: apply_backlight
+
+button:
+  - platform: template
+    name: "Режим Экран ЧАСЫ [CLOCK]"
+    id: btn_set_clock
+    icon: "mdi:clock-outline"
+    on_press:
+      then:
+        - lambda: |-
+            if (id(backlight_brightness) <= 0.0f) {
+              id(backlight_brightness) = id(last_backlight_brightness);
+            }
+            id(backlight_enabled) = true;
+            id(current_display_mode) = "CLOCK";
+        - script.execute: apply_backlight
+        - component.update: tft_display
+
+  - platform: template
+    name: "Режим Экран ИНФО [INFO]"
+    id: btn_set_info
+    icon: "mdi:information-outline"
+    on_press:
+      then:
+        - lambda: |-
+            if (id(backlight_brightness) <= 0.0f) {
+              id(backlight_brightness) = id(last_backlight_brightness);
+            }
+            id(backlight_enabled) = true;
+            id(current_display_mode) = "INFO";
+        - script.execute: apply_backlight
+        - component.update: tft_display
+
+  - platform: template
+    name: "Режим Экран ВЫКЛ [OFF]"
+    id: btn_set_off
+    icon: "mdi:display-off"
+    on_press:
+      then:
+        - lambda: |-
+            id(backlight_enabled) = false;
+            id(current_display_mode) = "OFF";
+        - script.execute: apply_backlight
+        - component.update: tft_display
+
+number:
+  - platform: template
+    name: "Регулировка подсветки"
+    id: backlight_slider
+    icon: "mdi:brightness-6"
+    min_value: 0
+    max_value: 100
+    step: 1
+    unit_of_measurement: "%"
+    mode: SLIDER
+    lambda: |-
+      return id(backlight_brightness) * 100.0f;
+    set_action:
+      then:
+        - lambda: |-
+            float pct = x / 100.0f;
+            if (pct > 0.0f) {
+              id(backlight_brightness) = pct;
+              id(last_backlight_brightness) = pct;
+              id(backlight_enabled) = true;
+            } else {
+              id(backlight_brightness) = 0.0f;
+              id(backlight_enabled) = false;
+            }
+        - script.execute: apply_backlight
+
+light:
+  - platform: esp32_rmt_led_strip
+    id: onboard_rgb_led
+    name: "Встроенный светодиод"
+    pin: GPIO8
+    num_leds: 1
+    channel_colors: GRB
+    chipset: WS2812
+    effects:
+      - addressable_lambda:
+          name: "LSD"
+          update_interval: 100ms
+          lambda: |-
+            static float hue = 0.0f;
+            hue += 0.002f;
+            if (hue >= 1.0f) hue -= 1.0f;
+
+            float h = hue * 6.0f;
+            int i = (int)h;
+            float f = h - (float)i;
+            float v = 0.55f;
+            float p = 0.0f;
+            float q = v * (1.0f - f);
+            float t = v * f;
+            float r = 0, g = 0, b = 0;
+            switch (i) {
+              case 0: r = v; g = t; b = p; break;
+              case 1: r = q; g = v; b = p; break;
+              case 2: r = p; g = v; b = t; break;
+              case 3: r = p; g = q; b = v; break;
+              case 4: r = t; g = p; b = v; break;
+              case 5: r = v; g = p; b = q; break;
+            }
+            it[0] = Color((uint8_t)(r * 255), (uint8_t)(g * 255), (uint8_t)(b * 255));
+      - addressable_color_wipe:
+          name: "Смена Цвета"
+      - addressable_scan:
+          name: "Сканирование"
+
+sensor:
+  # Датчик CO2 HC8 (через кастомный компонент)
+  - platform: hc8_full
+    uart_id: uart_hc8
+    update_interval: 60s
+    co2:
+      name: "Локальный CO₂"
+      id: local_co2
+
+  # Температура и влажность AHT20
+  - platform: aht10
+    variant: AHT20
+    temperature:
+      name: "Локальная Температура"
+      id: local_temp
+      filters:
+        - offset: -2.33
+    humidity:
+      name: "Локальная Влажность"
+      id: local_hum
+      filters:
+        - offset: 9.67
+    update_interval: 30s
+
+  # Давление BMP280
+  - platform: bmp280_i2c
+    address: 0x77
+    pressure:
+      name: "Локальное Давление"
+      id: local_press
+      filters:
+        - lambda: return x * 0.75006;
+      unit_of_measurement: "мм рт. ст."
+      accuracy_decimals: 1
+    update_interval: 30s
+
+binary_sensor:
+  # Статусы из Home Assistant — ЗАМЕНИ на свои entity_id!
+  - platform: homeassistant
+    id: lock_status
+    entity_id: switch.example_lock
+  - platform: homeassistant
+    id: light_status
+    entity_id: light.example_light
+
+  # Сенсорная кнопка (GPIO15)
+  - platform: gpio
+    pin:
+      number: GPIO15
+      mode: INPUT_PULLUP
+      inverted: true
+    id: touch_button
+    name: "Сенсорная кнопка"
+    filters:
+      - delayed_on_off: 50ms
+
+  # Физическая кнопка (GPIO9) с многоклик-логикой
+  - platform: gpio
+    pin:
+      number: GPIO9
+      mode: INPUT_PULLUP
+      inverted: true
+    id: hardware_switch_button
+    name: "Физическая переключалка"
+    filters:
+      - delayed_on_off: 30ms
+    on_multi_click:
+      - timing:
+          - ON for at least 5s
+        then:
+          - logger.log: "BTN: LONG_5S"
+          - script.execute: handle_long_5s
+      - timing:
+          - ON for at least 3s
+          - OFF for at least 0.05s
+        then:
+          - logger.log: "BTN: LONG_3S"
+          - script.execute: handle_long_3s
+      - timing:
+          - ON for at most 0.4s
+          - OFF for at most 0.35s
+          - ON for at most 0.4s
+          - OFF for at least 0.05s
+        then:
+          - logger.log: "BTN: DOUBLE"
+          - script.execute: handle_double_click
+      - timing:
+          - ON for at most 0.4s
+          - OFF for at least 0.35s
+        then:
+          - logger.log: "BTN: SINGLE"
+          - script.execute: handle_single_click
+
+text_sensor:
+  # Данные из Home Assistant — ЗАМЕНИ на свои entity_id!
+  - platform: homeassistant
+    id: track_title
+    entity_id: media_player.example_player
+    attribute: media_title
+  - platform: homeassistant
+    id: track_artist
+    entity_id: media_player.example_player
+    attribute: media_artist
+  - platform: homeassistant
+    id: calendar_time
+    entity_id: calendar.example_calendar
+    attribute: start_time
+  - platform: homeassistant
+    id: krd_weather_temp
+    entity_id: weather.example_weather
+    attribute: temperature
+
+logger:
+  level: DEBUG
+
+interval:
+  - interval: 50ms
+    then:
+      - lambda: |-
+          if (id(current_display_mode) == "INFO") {
+            std::string title = id(track_title).state;
+            if (!title.empty()) {
+              id(scroll_x) -= 2;
+              if (id(scroll_x) < -400) {
+                id(scroll_x) = 320;
+              }
+            } else {
+              id(scroll_x) = 320;
+            }
+          }
+
+spi:
+  clk_pin: GPIO6
+  mosi_pin: GPIO7
+
+display:
+  - platform: mipi_spi
+    id: tft_display
+    model: ST7789V
+    cs_pin: GPIO18
+    dc_pin: GPIO19
+    reset_pin: GPIO20
+    dimensions:
+      width: 240
+      height: 320
+    rotation: 90
+    invert_colors: true
+    data_rate: 40MHz
+    update_interval: 250ms
+    lambda: |-
+      auto time_now = id(current_time).now();
+      it.fill(Color(0,0,0));
+      std::string current_mode = id(current_display_mode);
+
+      if (current_mode == "CLOCK") {
+        it.strftime(160, 120, id(font_thin_big), Color(90, 90, 90), TextAlign::CENTER, "%H:%M", time_now);
+        it.strftime(160, 190, id(font_thin_small), Color(70, 70, 70), TextAlign::CENTER, "%d.%m.%Y", time_now);
+      }
+      else if (current_mode == "INFO") {
+        it.rectangle(2, 2, 316, 236, Color(255,255,255));
+        it.start_clipping(5, 5, 315, 45);
+        std::string title = id(track_title).state;
+        std::string artist = id(track_artist).state;
+        std::string full_track = artist.empty() ? title : artist + " - " + title;
+        if (!title.empty()) {
+          it.print(id(scroll_x), 15, id(font_large), Color(255,255,255), full_track.c_str());
+        } else {
+          it.print(160, 15, id(font_large), Color(100,100,100), TextAlign::CENTER, "Пауза");
+        }
+        it.end_clipping();
+        it.line(2, 50, 318, 50, Color(255,255,255));
+        it.line(160, 50, 160, 238, Color(255,255,255));
+
+        it.strftime(80, 72, id(font_clock), Color(255,255,255), TextAlign::CENTER, "%H:%M", time_now);
+        it.strftime(80, 102, id(font_small), Color(170,170,170), TextAlign::CENTER, "%d.%m.%Y", time_now);
+        std::string day_ru = "---";
+        switch(time_now.day_of_week) {
+          case 2: day_ru = "Понедельник"; break;
+          case 3: day_ru = "Вторник"; break;
+          case 4: day_ru = "Среда"; break;
+          case 5: day_ru = "Четверг"; break;
+          case 6: day_ru = "Пятница"; break;
+          case 7: day_ru = "Суббота"; break;
+          case 1: day_ru = "Воскресенье"; break;
+        }
+        it.print(80, 122, id(font_small), Color(140,140,140), TextAlign::CENTER, day_ru.c_str());
+
+        std::string alarm = id(calendar_time).state;
+        if (alarm.length() >= 16) {
+          std::string display_alarm = alarm.substr(11, 5);
+          it.printf(80, 147, id(font_small), Color(255,255,0), TextAlign::CENTER, "Будильник: %s", display_alarm.c_str());
+        } else {
+          it.print(80, 147, id(font_small), Color(100,100,100), TextAlign::CENTER, "Будильник: --:--");
+        }
+        it.line(15, 165, 145, 165, Color(150,150,150));
+
+        float out_temp = atof(id(krd_weather_temp).state.c_str());
+        it.printf(80, 185, id(font_small), Color(255,165,0), TextAlign::CENTER, "Улица: %.1f°C", out_temp);
+
+        if (id(local_co2).has_state()) {
+          it.printf(175, 65, id(font_small), Color(0,255,0), "CO2: %.0f ppm", id(local_co2).state);
+        } else {
+          it.print(175, 65, id(font_small), Color(100,100,100), "CO2: ---");
+        }
+        if (id(local_temp).has_state()) {
+          it.printf(175, 95, id(font_small), Color(0,255,255), "Темп: %.1f C", id(local_temp).state);
+        } else {
+          it.print(175, 95, id(font_small), Color(100,100,100), "Темп: ---");
+        }
+        if (id(local_hum).has_state()) {
+          it.printf(175, 125, id(font_small), Color(0,255,255), "Влаж: %.0f %%", id(local_hum).state);
+        } else {
+          it.print(175, 125, id(font_small), Color(100,100,100), "Влаж: ---");
+        }
+        it.line(175, 155, 305, 155, Color(150,150,150));
+        it.print(175, 170, id(font_small), Color(255,255,255), "Замок:");
+        if (id(lock_status).state) {
+          it.print(240, 170, id(font_small), Color(0,255,0), "ЗАКРЫТ");
+        } else {
+          it.print(240, 170, id(font_small), Color(255,0,0), "ОТКРЫТ");
+        }
+        it.print(175, 200, id(font_small), Color(255,255,255), "Свет:");
+        if (id(light_status).state) {
+          it.print(240, 200, id(font_small), Color(255,255,0), "ВКЛ");
+        } else {
+          it.print(240, 200, id(font_small), Color(150,150,150), "ВЫКЛ");
+        }
+      }
+      else if (current_mode == "SETTINGS") {
+        it.print(160, 8, id(font_large), Color(255,255,255), TextAlign::CENTER, "ПОДСВЕТКА");
+        it.line(10, 40, 310, 40, Color(100,100,100));
+
+        static const char* labels[3] = {"4%", "30%", "100%"};
+        static const float levels[3] = {0.04f, 0.30f, 1.00f};
+
+        for (int i = 0; i < 3; i++) {
+          int y = 60 + i * 50;
+          bool active = (i == id(settings_index));
+          Color c = active ? Color(0,255,0) : Color(120,120,120);
+          if (active) {
+            it.rectangle(8, y - 4, 304, 40, Color(0,150,0));
+          }
+          it.printf(20, y + 6, id(font_large), c, "%s", labels[i]);
+
+          int bar_w = (int)(levels[i] * 170.0f);
+          if (bar_w < 2) bar_w = 2;
+          it.rectangle(110, y + 10, 170, 16, c);
+          it.filled_rectangle(110, y + 10, bar_w, 16, c);
+        }
+
+        it.print(160, 214, id(font_small), Color(150,150,150), TextAlign::CENTER, "1 клик - выбор | 2 клика - выход");
+      }
+      else if (current_mode == "LED_MENU") {
+        it.print(160, 8, id(font_large), Color(255,255,255), TextAlign::CENTER, "СВЕТОДИОД");
+        it.line(10, 40, 310, 40, Color(100,100,100));
+
+        static const char* led_labels[3] = {"КРАСНЫЙ", "ТЁПЛЫЙ БЕЛЫЙ", "LSD"};
+        static const Color led_colors[3] = {Color(255,80,80), Color(255,200,130), Color(180,80,255)};
+
+        for (int i = 0; i < 3; i++) {
+          int y = 60 + i * 50;
+          bool active = (i == id(led_mode_index));
+          Color c = active ? led_colors[i] : Color(120,120,120);
+          if (active) {
+            it.rectangle(8, y - 4, 304, 40, led_colors[i]);
+          }
+          it.printf(20, y + 6, id(font_large), c, "%s", led_labels[i]);
+        }
+
+        it.print(160, 214, id(font_small), Color(150,150,150), TextAlign::CENTER, "1 клик - выбор | 2 клика - выход");
+      }
+      else if (current_mode == "OFF") {
+        // Черный экран
+      }
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_large
+    size: 24
+    glyphs: &glyphs [ '0123456789!"#$%&''()*+,-./:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~ ', "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя°«»" ]
+
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 18
+    glyphs: *glyphs
+
+  - file: "gfonts://Roboto"
+    id: font_clock
+    size: 34
+    glyphs: *glyphs
+
+  - file: "gfonts://Roboto"
+    id: font_thin_big
+    size: 85
+    glyphs: *glyphs
+
+  - file: "gfonts://Roboto"
+    id: font_thin_small
+    size: 28
+    glyphs: *glyphs
