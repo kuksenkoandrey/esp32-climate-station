@@ -15,7 +15,6 @@ esphome:
   on_boot:
     priority: 600
     then:
-      # Инициализация LEDC для подсветки дисплея (GPIO10)
       - lambda: |-
           ledc_timer_config_t ledc_timer = {
               .speed_mode       = LEDC_LOW_SPEED_MODE,
@@ -36,7 +35,6 @@ esphome:
               .hpoint         = 0
           };
           ledc_channel_config(&ledc_channel);
-      # Инициализация глобальных переменных
       - lambda: |-
           id(current_display_mode) = "CLOCK";
           id(backlight_brightness) = 1.0f;
@@ -58,7 +56,6 @@ esp32:
   framework:
     type: esp-idf
 
-# Кастомный компонент для датчика HC8 (лежит в ../components/hc8_full)
 external_components:
   - source:
       type: local
@@ -408,7 +405,6 @@ light:
           name: "Сканирование"
 
 sensor:
-  # Датчик CO2 HC8 (через кастомный компонент)
   - platform: hc8_full
     uart_id: uart_hc8
     update_interval: 60s
@@ -416,7 +412,6 @@ sensor:
       name: "Локальный CO₂"
       id: local_co2
 
-  # Температура и влажность AHT20
   - platform: aht10
     variant: AHT20
     temperature:
@@ -431,7 +426,6 @@ sensor:
         - offset: 9.67
     update_interval: 30s
 
-  # Давление BMP280
   - platform: bmp280_i2c
     address: 0x77
     pressure:
@@ -444,7 +438,6 @@ sensor:
     update_interval: 30s
 
 binary_sensor:
-  # Статусы из Home Assistant — ЗАМЕНИ на свои entity_id!
   - platform: homeassistant
     id: lock_status
     entity_id: switch.example_lock
@@ -452,7 +445,6 @@ binary_sensor:
     id: light_status
     entity_id: light.example_light
 
-  # Сенсорная кнопка (GPIO15)
   - platform: gpio
     pin:
       number: GPIO15
@@ -463,7 +455,6 @@ binary_sensor:
     filters:
       - delayed_on_off: 50ms
 
-  # Физическая кнопка (GPIO9) с многоклик-логикой
   - platform: gpio
     pin:
       number: GPIO9
@@ -501,7 +492,6 @@ binary_sensor:
           - script.execute: handle_single_click
 
 text_sensor:
-  # Данные из Home Assistant — ЗАМЕНИ на свои entity_id!
   - platform: homeassistant
     id: track_title
     entity_id: media_player.example_player
